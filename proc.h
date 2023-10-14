@@ -1,3 +1,11 @@
+#define MAX_PSYC_PAGES 15
+#define MAX_TOTAL_PAGES 30
+#define MAX_SWAP_PAGES (MAX_TOTAL_PAGES - MAX_PSYC_PAGES)
+
+enum paging_algo { FIFO, AGING };
+
+#define PAGING_ALGO AGING
+
 // Per-CPU state
 struct cpu {
   uchar apicid;                // Local APIC ID
@@ -49,6 +57,14 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  //Swap file. must initiate with create swap file
+  struct file *swapFile;			//page file
+  uint swapMap[MAX_SWAP_PAGES];
+  uint swapPageCount;
+  uint memPageCount;
+  uint pagesFIFO[MAX_PSYC_PAGES];
+  uint pagesAge[MAX_PSYC_PAGES];
+  uint verbose;
 };
 
 // Process memory is laid out contiguously, low addresses first:

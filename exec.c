@@ -7,9 +7,7 @@
 #include "x86.h"
 #include "elf.h"
 
-int
-exec(char *path, char **argv)
-{
+int exec(char *path, char **argv) {
   char *s, *last;
   int i, off;
   uint argc, sz, sp, ustack[3+MAXARG+1];
@@ -38,7 +36,21 @@ exec(char *path, char **argv)
   if((pgdir = setupkvm()) == 0)
     goto bad;
 
+  // Save program name for debugging.
+  for(last=s=path; *s; s++)
+    if(*s == '/')
+      last = s+1;
+  safestrcpy(curproc->name, last, sizeof(curproc->name));
+
+  if( isUserProc(curproc) ) createSwapFile(curproc);
+
   // Load program into memory.
+  curproc->memPageCount = 0;
+  curproc->swapPageCount = 0;
+  for( int i=0; i<MAX_SWAP_PAGES; i++ ) curproc->swapMap[i] = 1;
+  for( int i=0; i<MAX_PSYC_PAGES; i++ ) curproc->pagesAge[i] = 0;
+  curproc->verbose = 0;
+
   sz = 0;
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
     if(readi(ip, (char*)&ph, off, sizeof(ph)) != sizeof(ph))
@@ -66,6 +78,15 @@ exec(char *path, char **argv)
   if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
     goto bad;
   clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+  for( int i=0; i<curproc->memPageCount; i++ ) {
+    if( curproc->pagesFIFO[i] == (sz - 2*PGSIZE) ) {
+      for( int j=i; j<curproc->memPageCount-1; j++ ) {
+        curproc->pagesFIFO[j] = curproc->pagesFIFO[j+1];
+      }
+      curproc->memPageCount--;
+      break;
+    }
+  }
   sp = sz;
 
   // Push argument strings, prepare rest of stack in ustack.
@@ -86,12 +107,6 @@ exec(char *path, char **argv)
   sp -= (3+argc+1) * 4;
   if(copyout(pgdir, sp, ustack, (3+argc+1)*4) < 0)
     goto bad;
-
-  // Save program name for debugging.
-  for(last=s=path; *s; s++)
-    if(*s == '/')
-      last = s+1;
-  safestrcpy(curproc->name, last, sizeof(curproc->name));
 
   // Commit to the user image.
   oldpgdir = curproc->pgdir;

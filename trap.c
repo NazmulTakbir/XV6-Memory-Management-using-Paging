@@ -14,9 +14,7 @@ extern uint vectors[];  // in vectors.S: array of 256 entry pointers
 struct spinlock tickslock;
 uint ticks;
 
-void
-tvinit(void)
-{
+void tvinit(void) {
   int i;
 
   for(i = 0; i < 256; i++)
@@ -26,16 +24,12 @@ tvinit(void)
   initlock(&tickslock, "time");
 }
 
-void
-idtinit(void)
-{
+void idtinit(void) {
   lidt(idt, sizeof(idt));
 }
 
 //PAGEBREAK: 41
-void
-trap(struct trapframe *tf)
-{
+void trap(struct trapframe *tf) {
   if(tf->trapno == T_SYSCALL){
     if(myproc()->killed)
       exit();
@@ -46,6 +40,10 @@ trap(struct trapframe *tf)
     return;
   }
 
+  uint pgdir_entry, pgtable_index, pgtable_entry, pgtable_PPN, faultingAddress;
+  uint* pgtable_base;
+  struct proc *p = myproc();
+
   switch(tf->trapno){
   case T_IRQ0 + IRQ_TIMER:
     if(cpuid() == 0){
@@ -53,6 +51,7 @@ trap(struct trapframe *tf)
       ticks++;
       wakeup(&ticks);
       release(&tickslock);
+      clockInterruptUpdate();
     }
     lapiceoi();
     break;
@@ -77,6 +76,40 @@ trap(struct trapframe *tf)
             cpuid(), tf->cs, tf->eip);
     lapiceoi();
     break;
+
+  case T_PGFLT:
+    faultingAddress = rcr2() ;
+    pgdir_entry = p->pgdir[PDX(faultingAddress)];
+    
+    if( p->verbose>=2 ) {
+      cprintf("\nFaulting Address: %d", faultingAddress);
+      cprintf("\nFaulting Page Number: %d", faultingAddress>>12);
+      memSwapInfo(p);
+    }
+
+    if( (pgdir_entry & PTE_P) == 0 ) {
+      panic("T_PGFLT: pgdir_entry invalid");
+    } 
+    else {
+      pgtable_PPN = pgdir_entry>>12;
+      pgtable_base = P2V(pgtable_PPN<<12);
+
+      pgtable_index = PTX(faultingAddress);
+      pgtable_entry = pgtable_base[pgtable_index];
+
+      if( (pgtable_entry & PTE_U) && (pgtable_entry & PTE_W) && (pgtable_entry & PTE_PG) ) {
+        swapIn(faultingAddress);
+        if( p->verbose>=2 ) {
+          memSwapInfo(p);
+          cprintf("------------------------------------------------------");
+          cprintf("------------------------------------------------------\n");
+        }
+        break;
+      }
+      else {
+        panic("T_PGFLT: pgtable_entry invalid");
+      }
+    }
 
   //PAGEBREAK: 13
   default:

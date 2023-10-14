@@ -20,23 +20,18 @@ extern void trapret(void);
 
 static void wakeup1(void *chan);
 
-void
-pinit(void)
-{
+void pinit(void) {
   initlock(&ptable.lock, "ptable");
 }
 
 // Must be called with interrupts disabled
-int
-cpuid() {
+int cpuid() {
   return mycpu()-cpus;
 }
 
 // Must be called with interrupts disabled to avoid the caller being
 // rescheduled between reading lapicid and running through the loop.
-struct cpu*
-mycpu(void)
-{
+struct cpu* mycpu(void) {
   int apicid, i;
   
   if(readeflags()&FL_IF)
@@ -54,8 +49,7 @@ mycpu(void)
 
 // Disable interrupts so that we are not rescheduled
 // while reading proc from the cpu structure
-struct proc*
-myproc(void) {
+struct proc* myproc(void) {
   struct cpu *c;
   struct proc *p;
   pushcli();
@@ -70,9 +64,7 @@ myproc(void) {
 // If found, change state to EMBRYO and initialize
 // state required to run in the kernel.
 // Otherwise return 0.
-static struct proc*
-allocproc(void)
-{
+static struct proc* allocproc(void) {
   struct proc *p;
   char *sp;
 
@@ -117,9 +109,7 @@ found:
 
 //PAGEBREAK: 32
 // Set up first user process.
-void
-userinit(void)
-{
+void userinit(void) {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
 
@@ -155,9 +145,7 @@ userinit(void)
 
 // Grow current process's memory by n bytes.
 // Return 0 on success, -1 on failure.
-int
-growproc(int n)
-{
+int growproc(int n) {
   uint sz;
   struct proc *curproc = myproc();
 
@@ -174,12 +162,17 @@ growproc(int n)
   return 0;
 }
 
+int isUserProc(struct proc* p) {
+  if( p->pid<=2 || !p ) return 0;
+  if( strlen(p->name)==0 ) return 0;
+  if( strncmp(p->name, "sh", 2) != 0 && strncmp(p->name, "init", 4) != 0 ) return 1;
+  else return 0;
+}
+
 // Create a new process copying p as the parent.
 // Sets up stack to return as if from system call.
 // Caller must set state of returned proc to RUNNABLE.
-int
-fork(void)
-{
+int fork(void) {
   int i, pid;
   struct proc *np;
   struct proc *curproc = myproc();
@@ -187,6 +180,18 @@ fork(void)
   // Allocate process.
   if((np = allocproc()) == 0){
     return -1;
+  }
+
+  if( isUserProc(curproc) ) {
+    if( createSwapFile(np)!=0 ) cprintf("%s %d - File Creation Failure\n", np->name, np->pid);
+    char buffer[PGSIZE/2];
+    for( int i=0; i<MAX_SWAP_PAGES; i++ ) {
+      readFromSwapFile(curproc, buffer, PGSIZE*i, PGSIZE/2) ;
+      writeToSwapFile(np, buffer, PGSIZE*i, PGSIZE/2);
+
+      readFromSwapFile(curproc, buffer, PGSIZE*i+PGSIZE/2, PGSIZE/2) ;
+      writeToSwapFile(np, buffer, PGSIZE*i+PGSIZE/2, PGSIZE/2);
+    }
   }
 
   // Copy process state from proc.
@@ -218,15 +223,20 @@ fork(void)
 
   release(&ptable.lock);
 
+  for( int i=0; i<MAX_SWAP_PAGES; i++ ) np->swapMap[i] = curproc->swapMap[i];
+  np->memPageCount = curproc->memPageCount;
+  np->swapPageCount = curproc->swapPageCount;
+  for( int i=0; i<MAX_PSYC_PAGES; i++ ) np->pagesFIFO[i] = curproc->pagesFIFO[i];
+  for( int i=0; i<MAX_PSYC_PAGES; i++ ) np->pagesAge[i] = curproc->pagesAge[i];
+  np->verbose = curproc->verbose;
+
   return pid;
 }
 
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait() to find out it exited.
-void
-exit(void)
-{
+void exit(void) {
   struct proc *curproc = myproc();
   struct proc *p;
   int fd;
@@ -241,6 +251,8 @@ exit(void)
       curproc->ofile[fd] = 0;
     }
   }
+  
+  if( isUserProc(curproc) ) removeSwapFile(curproc);
 
   begin_op();
   iput(curproc->cwd);
@@ -269,9 +281,7 @@ exit(void)
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int
-wait(void)
-{
+int wait(void) {
   struct proc *p;
   int havekids, pid;
   struct proc *curproc = myproc();
@@ -319,12 +329,11 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
-void
-scheduler(void)
-{
+void scheduler(void) {
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
+  int ran;     
   
   for(;;){
     // Enable interrupts on this processor.
@@ -332,13 +341,14 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    for(ran = 0, p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
+      ran = 1;     
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
@@ -352,6 +362,9 @@ scheduler(void)
     }
     release(&ptable.lock);
 
+    if( ran==0 ) {    
+      halt();
+    }
   }
 }
 
@@ -362,9 +375,7 @@ scheduler(void)
 // be proc->intena and proc->ncli, but that would
 // break in the few places where a lock is held but
 // there's no process.
-void
-sched(void)
-{
+void sched(void) {
   int intena;
   struct proc *p = myproc();
 
@@ -382,9 +393,7 @@ sched(void)
 }
 
 // Give up the CPU for one scheduling round.
-void
-yield(void)
-{
+void yield(void) {
   acquire(&ptable.lock);  //DOC: yieldlock
   myproc()->state = RUNNABLE;
   sched();
@@ -393,9 +402,7 @@ yield(void)
 
 // A fork child's very first scheduling by scheduler()
 // will swtch here.  "Return" to user space.
-void
-forkret(void)
-{
+void forkret(void) {
   static int first = 1;
   // Still holding ptable.lock from scheduler.
   release(&ptable.lock);
@@ -414,9 +421,7 @@ forkret(void)
 
 // Atomically release lock and sleep on chan.
 // Reacquires lock when awakened.
-void
-sleep(void *chan, struct spinlock *lk)
-{
+void sleep(void *chan, struct spinlock *lk) {
   struct proc *p = myproc();
   
   if(p == 0)
@@ -454,9 +459,7 @@ sleep(void *chan, struct spinlock *lk)
 //PAGEBREAK!
 // Wake up all processes sleeping on chan.
 // The ptable lock must be held.
-static void
-wakeup1(void *chan)
-{
+static void wakeup1(void *chan) {
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
@@ -465,9 +468,7 @@ wakeup1(void *chan)
 }
 
 // Wake up all processes sleeping on chan.
-void
-wakeup(void *chan)
-{
+void wakeup(void *chan) {
   acquire(&ptable.lock);
   wakeup1(chan);
   release(&ptable.lock);
@@ -476,9 +477,7 @@ wakeup(void *chan)
 // Kill the process with the given pid.
 // Process won't exit until it returns
 // to user space (see trap in trap.c).
-int
-kill(int pid)
-{
+int kill(int pid) {
   struct proc *p;
 
   acquire(&ptable.lock);
@@ -496,13 +495,39 @@ kill(int pid)
   return -1;
 }
 
+void printAge(uint age) {
+  uint mask = 0x80000000;
+  for( int i=0; i<32; i++ ) {
+    if( mask&age ) cprintf("1");
+    else cprintf("0");
+    mask >>= 1;
+  }
+}
+
+void memSwapInfo(struct proc *p) {
+  cprintf("\nNumber of Pages in Memory: %d", p->memPageCount);
+  cprintf("\nNumber of Pages in Swapspace: %d", p->swapPageCount);
+  cprintf("\nProgram Size: %d", p->sz);
+  cprintf("\nPages FIFO:\n\t");
+  for( int i=0; i<p->memPageCount; i++ ) {
+    if( p->pagesFIFO[i]/4096 >= 10 ) cprintf("%d - ", p->pagesFIFO[i]/4096);
+    else cprintf(" %d - ", p->pagesFIFO[i]/4096);
+    printAge(p->pagesAge[i]);
+    cprintf("\n\t");
+  }
+  cprintf("\nSwap Map: ");
+  for( int i=0; i<MAX_SWAP_PAGES; i++ ) {
+    if( p->swapMap[i]==1 ) cprintf("%d ", -1);
+    else cprintf("%d ", p->swapMap[i]/4096);
+  }
+  cprintf("\n");
+}
+
 //PAGEBREAK: 36
 // Print a process listing to console.  For debugging.
 // Runs when user types ^P on console.
 // No lock to avoid wedging a stuck machine further.
-void
-procdump(void)
-{
+void procdump(void) {
   static char *states[] = {
   [UNUSED]    "unused",
   [EMBRYO]    "embryo",
@@ -529,6 +554,43 @@ procdump(void)
       for(i=0; i<10 && pc[i] != 0; i++)
         cprintf(" %p", pc[i]);
     }
-    cprintf("\n");
+    printPagingInfo(p);
+    memSwapInfo(p);
+    cprintf("\n\n");
   }
+}
+
+void clockInterruptUpdate() {
+  struct proc *p;
+  uint pageAddress, pgdir_entry, pgtable_PPN, pgtable_index;
+  uint *pgtable_base, *pgtable_entry;
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if( p->state!=UNUSED && p->state!=ZOMBIE && isUserProc(p) ) {
+      for( int i=0; i<p->memPageCount; i++ ) {
+        pageAddress = p->pagesFIFO[i];
+        pgdir_entry = p->pgdir[ PDX(pageAddress) ];
+
+        pgtable_PPN = pgdir_entry>>12;
+        pgtable_base = P2V(pgtable_PPN<<12);
+
+        pgtable_index = PTX(pageAddress);
+        pgtable_entry = &pgtable_base[pgtable_index];
+
+        p->pagesAge[i] >>= 1;
+        if( *pgtable_entry & PTE_A ) {
+          *pgtable_entry = (*pgtable_entry) & ~PTE_A;
+          p->pagesAge[i] = 0x80000000 | p->pagesAge[i];
+        }
+      }
+    }
+  }
+}
+
+struct proc* getProcFromPgdir(pde_t *pgdir) {
+  struct proc* p;
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if( p->pgdir==pgdir ) break;
+  }
+  return p;
 }

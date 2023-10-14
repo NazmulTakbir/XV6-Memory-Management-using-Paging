@@ -42,9 +42,20 @@ sys_getpid(void)
   return myproc()->pid;
 }
 
-int
-sys_sbrk(void)
-{
+int sys_verbose(void) {
+  int v;
+  argint(0, &v);
+  myproc()->verbose = v;
+  return 0;
+}
+
+int sys_meminfo(void) {
+  printPagingInfo(myproc());
+  memSwapInfo(myproc());
+  return 0;
+}
+
+int sys_sbrk(void) {
   int addr;
   int n;
 
